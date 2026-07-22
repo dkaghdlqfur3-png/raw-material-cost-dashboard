@@ -1298,55 +1298,8 @@ with st.sidebar:
         format_func=lambda x: f"최근 {x}개월",
     )
 
-    st.divider()
-    st.markdown(
-        """
-        **필수 입력값**
-        - 품목
-        - 날짜
-        - 값
-
-        **선택 입력값**
-        - 단위
-        - 사용 품목
-        - 출처
-        """
-    )
-
 if uploaded_file is None:
     st.info("왼쪽에서 엑셀 입력 양식을 내려받아 데이터를 입력한 뒤 업로드해 주세요.")
-
-    st.markdown("### 지원하는 엑셀 형식")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**세로형 권장**")
-        st.dataframe(
-            pd.DataFrame({
-                "품목": ["나프타", "나프타", "USD/KRW"],
-                "날짜": ["2026-06", "2026-07", "2026-07"],
-                "값": [650, 670, 1385],
-                "단위": ["USD/MT", "USD/MT", "KRW"],
-                "사용 품목": ["PP수지", "PP수지", "수입품"],
-            }),
-            hide_index=True,
-            use_container_width=True,
-        )
-
-    with col2:
-        st.markdown("**가로형도 지원**")
-        st.dataframe(
-            pd.DataFrame({
-                "품목": ["나프타", "USD/KRW"],
-                "단위": ["USD/MT", "KRW"],
-                "2026-05": [640, 1370],
-                "2026-06": [650, 1380],
-                "2026-07": [670, 1385],
-            }),
-            hide_index=True,
-            use_container_width=True,
-        )
-
     st.stop()
 
 try:
