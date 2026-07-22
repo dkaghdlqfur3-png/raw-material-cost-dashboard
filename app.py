@@ -24,11 +24,17 @@ st.markdown(
     <style>
     .block-container {
         max-width: 120rem;
-        padding-top: 1rem;
+        padding-top: 2.5rem;
         padding-bottom: 2rem;
     }
 
-    h1 { font-size: 2.15rem !important; }
+    h1 {
+        font-size: 2.15rem !important;
+        line-height: 1.35 !important;
+        padding-top: 0.25rem !important;
+        margin-top: 0 !important;
+        overflow: visible !important;
+    }
     h2 { font-size: 1.65rem !important; }
     h3 { font-size: 1.30rem !important; }
 
