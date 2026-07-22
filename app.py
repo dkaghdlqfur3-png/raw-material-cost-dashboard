@@ -1047,17 +1047,23 @@ def render_chart(df, key):
         y_title = "값"
 
     fig = go.Figure()
+    line_colors = [
+        "#1565C0", "#EF5350", "#2E7D32", "#8E24AA",
+        "#F57C00", "#00838F", "#6D4C41", "#C2185B",
+    ]
+    label_endpoints = []
 
-    for item in selected:
+    for item_index, item in enumerate(selected):
         item_df = chart_df[chart_df["item"] == item].sort_values("date")
+        line_color = line_colors[item_index % len(line_colors)]
         fig.add_trace(
             go.Scatter(
                 x=item_df["date"],
                 y=item_df["chart_value"],
                 mode="lines+markers",
                 name=item,
-                line={"width": 3},
-                marker={"size": 7},
+                line={"width": 3, "color": line_color},
+                marker={"size": 7, "color": line_color},
                 customdata=item_df[["value", "display_unit"]],
                 hovertemplate=(
                     "<b>%{fullData.name}</b><br>"
@@ -1067,10 +1073,57 @@ def render_chart(df, key):
                 ),
             )
         )
+        if not item_df.empty:
+            last_row = item_df.iloc[-1]
+            label_endpoints.append({
+                "item": item,
+                "date": last_row["date"],
+                "value": float(last_row["chart_value"]),
+                "color": line_color,
+            })
+
+    # 끝점 값이 가까운 지표들은 라벨을 위아래로 자동 분산합니다.
+    if label_endpoints:
+        endpoint_values = [point["value"] for point in label_endpoints]
+        value_range = max(endpoint_values) - min(endpoint_values)
+        collision_threshold = max(value_range * 0.06, abs(max(endpoint_values)) * 0.008, 1e-9)
+        sorted_points = sorted(label_endpoints, key=lambda point: point["value"])
+        label_groups = []
+        current_group = [sorted_points[0]]
+
+        for point in sorted_points[1:]:
+            if point["value"] - current_group[-1]["value"] <= collision_threshold:
+                current_group.append(point)
+            else:
+                label_groups.append(current_group)
+                current_group = [point]
+        label_groups.append(current_group)
+
+        for group in label_groups:
+            group_size = len(group)
+            for group_index, point in enumerate(group):
+                vertical_offset = int((group_index - (group_size - 1) / 2) * 34)
+                fig.add_annotation(
+                    x=point["date"],
+                    y=point["value"],
+                    text=f"<b>{html.escape(str(point['item']))}</b>",
+                    showarrow=True,
+                    arrowhead=0,
+                    arrowwidth=2,
+                    arrowcolor=point["color"],
+                    ax=42,
+                    ay=vertical_offset,
+                    xanchor="left",
+                    font={"color": point["color"], "size": 13},
+                    bgcolor="rgba(255,255,255,0.94)",
+                    bordercolor=point["color"],
+                    borderwidth=1,
+                    borderpad=4,
+                )
 
     fig.update_layout(
         height=520,
-        margin={"l": 20, "r": 20, "t": 20, "b": 20},
+        margin={"l": 20, "r": 230, "t": 20, "b": 20},
         hovermode="x unified",
         legend={
             "orientation": "h",
