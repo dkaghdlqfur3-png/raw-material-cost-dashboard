@@ -81,6 +81,42 @@ def load_saved_file():
     return base64.b64decode(encoded_content)
 
 
+def load_saved_timestamp():
+    """latest.xlsx를 마지막으로 저장한 GitHub 커밋 시각을 한국 시간으로 반환합니다."""
+    settings = get_storage_settings()
+    if settings is None:
+        return None
+
+    token, repository, branch, file_path = settings
+    endpoint = (
+        f"https://api.github.com/repos/{quote(repository, safe='/')}/commits"
+        f"?path={quote(file_path, safe='/')}&sha={quote(branch, safe='')}&per_page=1"
+    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "raw-material-cost-dashboard",
+    }
+    request = Request(endpoint, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=30) as response:
+            commits = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GitHub 저장 일시 조회 오류({exc.code}): {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"GitHub에 연결하지 못했습니다: {exc.reason}") from exc
+
+    if not commits:
+        return None
+    saved_at_text = commits[0].get("commit", {}).get("committer", {}).get("date")
+    if not saved_at_text:
+        return None
+    saved_at = datetime.fromisoformat(saved_at_text.replace("Z", "+00:00"))
+    return saved_at.astimezone(pytz.timezone("Asia/Seoul"))
+
+
 def save_latest_file(file_bytes):
     settings = get_storage_settings()
     if settings is None:
@@ -1465,9 +1501,15 @@ with st.sidebar:
 
 saved_file_error = None
 saved_file_bytes = None
+saved_file_timestamp = None
 if uploaded_file is None and storage_ready:
     try:
         saved_file_bytes = load_saved_file()
+        if saved_file_bytes is not None:
+            try:
+                saved_file_timestamp = load_saved_timestamp()
+            except Exception:
+                saved_file_timestamp = None
     except Exception as exc:
         saved_file_error = str(exc)
 
@@ -1488,8 +1530,12 @@ except Exception as exc:
 if save_clicked:
     try:
         save_latest_file(file_bytes)
+        saved_file_timestamp = datetime.now(pytz.timezone("Asia/Seoul"))
         st.toast("최신 파일로 저장했습니다.", icon="✅")
-        st.success("저장이 완료되었습니다. 다음부터는 이 링크만 열어도 현재 데이터가 자동으로 표시됩니다.")
+        st.success(
+            "저장이 완료되었습니다. "
+            f"최근 저장 일시: {saved_file_timestamp.strftime('%Y년 %m월 %d일 %H:%M')}"
+        )
     except Exception as exc:
         st.error(f"파일을 저장하지 못했습니다: {exc}")
 
@@ -1503,6 +1549,11 @@ else:
         "최근 저장한 파일을 자동으로 불러왔습니다. "
         f"확인된 시트: {', '.join(sheet_names)}"
     )
+    if saved_file_timestamp is not None:
+        st.info(
+            "최근 저장 일시: "
+            f"{saved_file_timestamp.strftime('%Y년 %m월 %d일 %H:%M')}"
+        )
 
 for message in load_messages:
     st.warning(message)
