@@ -1,13 +1,100 @@
+import base64
 import html
 import io
+import json
 import re
 from datetime import datetime
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import pytz
 import streamlit as st
+
+
+SAVED_FILE_NAME = "latest.xlsx"
+DEFAULT_GITHUB_REPOSITORY = "dkaghdlqfur3-png/raw-material-cost-dashboard"
+DEFAULT_GITHUB_BRANCH = "main"
+
+
+def get_storage_settings():
+    """GitHub 저장 설정을 반환하되 토큰은 앱 소스에 노출하지 않습니다."""
+    try:
+        storage = st.secrets["github_storage"]
+        token = str(storage["token"])
+        repository = str(storage.get("repository", DEFAULT_GITHUB_REPOSITORY))
+        branch = str(storage.get("branch", DEFAULT_GITHUB_BRANCH))
+        file_path = str(storage.get("file_path", SAVED_FILE_NAME))
+        return token, repository, branch, file_path
+    except (KeyError, FileNotFoundError):
+        return None
+
+
+def github_contents_request(method="GET", body=None):
+    settings = get_storage_settings()
+    if settings is None:
+        raise RuntimeError("GitHub 저장 설정이 아직 완료되지 않았습니다.")
+
+    token, repository, branch, file_path = settings
+    endpoint = (
+        f"https://api.github.com/repos/{quote(repository, safe='/')}/contents/"
+        f"{quote(file_path, safe='/')}"
+    )
+    if method == "GET":
+        endpoint += f"?ref={quote(branch, safe='')}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "raw-material-cost-dashboard",
+    }
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode("utf-8")
+
+    request = Request(endpoint, data=data, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        if method == "GET" and exc.code == 404:
+            return None
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GitHub 응답 오류({exc.code}): {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"GitHub에 연결하지 못했습니다: {exc.reason}") from exc
+
+
+def load_saved_file():
+    if get_storage_settings() is None:
+        return None
+    file_info = github_contents_request("GET")
+    if file_info is None:
+        return None
+    encoded_content = str(file_info.get("content", "")).replace("\n", "")
+    if not encoded_content:
+        raise RuntimeError("GitHub에서 저장 파일의 내용을 읽지 못했습니다.")
+    return base64.b64decode(encoded_content)
+
+
+def save_latest_file(file_bytes):
+    settings = get_storage_settings()
+    if settings is None:
+        raise RuntimeError("GitHub 저장 설정이 아직 완료되지 않았습니다.")
+    _, _, branch, _ = settings
+    current_file = github_contents_request("GET")
+    body = {
+        "message": "대시보드 최신 데이터 저장",
+        "content": base64.b64encode(file_bytes).decode("ascii"),
+        "branch": branch,
+    }
+    if current_file is not None and current_file.get("sha"):
+        body["sha"] = current_file["sha"]
+    github_contents_request("PUT", body)
 
 
 st.set_page_config(
@@ -883,7 +970,7 @@ def render_monthly_table(df, show_related=True, comparison_df=None, key="monthly
     if show_related:
         pivot.insert(
             1,
-            "사용 품목",
+            "관련 구매품",
             pivot["품목"].map(lambda x: metadata.get(x, {}).get("related") or "-"),
         )
     currency_position = 2 if show_related else 1
@@ -915,7 +1002,7 @@ def render_monthly_table(df, show_related=True, comparison_df=None, key="monthly
 
     info_columns = ["품목"]
     if show_related:
-        info_columns.append("사용 품목")
+        info_columns.append("관련 구매품")
     info_columns.extend(["통화", "단위"])
     previous_years = snapshot["previous_year"].dropna()
     previous_year_label = (
@@ -967,21 +1054,84 @@ def render_monthly_table(df, show_related=True, comparison_df=None, key="monthly
         lambda value: colorize_change(format_delta(value))
     )
 
-    table_html = safe_view.to_html(
-        index=False,
-        escape=False,
-        border=0,
-        classes="monthly-comparison-table",
+    year_groups = []
+    for month_date in month_dates:
+        year_label = f"{month_date.year}년"
+        if year_groups and year_groups[-1][0] == year_label:
+            year_groups[-1] = (year_label, year_groups[-1][1] + 1)
+        else:
+            year_groups.append((year_label, 1))
+
+    top_headers = "".join(
+        f'<th rowspan="2">{html.escape(column)}</th>' for column in info_columns
+    )
+    top_headers += "".join(
+        f'<th colspan="{count}">{year_label}</th>'
+        for year_label, count in year_groups
+    )
+    top_headers += '<th colspan="2">전월 대비</th><th colspan="3">전년 대비</th>'
+
+    sub_headers = "".join(
+        f"<th>{month_date.month}월</th>" for month_date in month_dates
+    )
+    sub_headers += (
+        "<th>차이</th><th>증감률</th>"
+        f"<th>{html.escape(previous_year_label)}</th><th>차이</th><th>증감률</th>"
+    )
+    safe_rows = list(safe_view.itertuples(index=False, name=None))
+    fixed_columns = ["품목"] + (["관련 구매품"] if show_related else [])
+    fixed_count = len(fixed_columns)
+    scroll_info_columns = ["통화", "단위"]
+    fixed_headers = "".join(
+        f"<th>{html.escape(column)}</th>" for column in fixed_columns
+    )
+    fixed_rows = "".join(
+        "<tr>" + "".join(f"<td>{value}</td>" for value in row[:fixed_count]) + "</tr>"
+        for row in safe_rows
+    )
+    data_rows = "".join(
+        "<tr>" + "".join(f"<td>{value}</td>" for value in row[fixed_count:]) + "</tr>"
+        for row in safe_rows
+    )
+    right_top_headers = "".join(
+        f'<th rowspan="2">{html.escape(column)}</th>'
+        for column in scroll_info_columns
+    )
+    right_top_headers += "".join(
+        f'<th colspan="{count}">{year_label}</th>'
+        for year_label, count in year_groups
+    )
+    right_top_headers += '<th colspan="2">전월 대비</th><th colspan="3">전년 대비</th>'
+    fixed_width = 370 if show_related else 150
+    table_html = (
+        '<div class="monthly-table-shell">'
+        f'<div class="monthly-fixed-pane" style="flex-basis:{fixed_width}px;min-width:{fixed_width}px">'
+        '<table class="monthly-comparison-table fixed-table">'
+        f"<thead><tr>{fixed_headers}</tr></thead><tbody>{fixed_rows}</tbody></table></div>"
+        '<div class="monthly-scroll-pane"><table class="monthly-comparison-table data-table">'
+        f"<thead><tr>{right_top_headers}</tr><tr>{sub_headers}</tr></thead>"
+        f"<tbody>{data_rows}</tbody></table></div></div>"
     )
     monthly_css = (
         "<style>"
-        ".monthly-scroll{overflow-x:auto;border:1px solid #d9dee7;border-radius:10px}"
+        ".monthly-table-shell{display:flex;width:100%;border:1px solid #d9dee7;"
+        "border-radius:10px;overflow:hidden;background:#fff}"
+        ".monthly-fixed-pane{flex:0 0 auto;position:relative;z-index:3;"
+        "box-shadow:5px 0 8px -5px #697786;background:#fff}"
+        ".monthly-scroll-pane{flex:1 1 auto;min-width:0;overflow-x:auto}"
         ".monthly-comparison-table{width:max-content;min-width:100%;border-collapse:collapse;"
         "font-size:1rem;color:#17233b}"
         ".monthly-comparison-table th{background:#e9edf3;color:#17233b;font-weight:800;"
         "padding:10px 9px;border:1px solid #cfd6df;white-space:nowrap;text-align:center}"
         ".monthly-comparison-table thead tr:first-child th{background:#dce3ec;"
         "font-size:1.02rem;border-bottom:2px solid #aeb8c6}"
+        ".fixed-table{width:100%;table-layout:fixed}"
+        ".fixed-table thead th{height:82px;vertical-align:middle;background:#dce3ec!important}"
+        ".data-table thead tr th{height:41px;box-sizing:border-box}"
+        ".monthly-comparison-table tbody tr{height:42px}"
+        ".monthly-comparison-table tbody td{height:42px;box-sizing:border-box}"
+        ".fixed-table th:nth-child(1),.fixed-table td:nth-child(1){width:150px}"
+        ".fixed-table th:nth-child(2),.fixed-table td:nth-child(2){width:220px}"
         ".monthly-comparison-table td{padding:10px 9px;border:1px solid #e0e4ea;"
         "white-space:nowrap;text-align:right;font-weight:520}"
         ".monthly-comparison-table td:first-child{text-align:left;font-weight:750}"
@@ -996,7 +1146,7 @@ def render_monthly_table(df, show_related=True, comparison_df=None, key="monthly
         "</style>"
     )
     st.markdown(
-        monthly_css + '<div class="monthly-scroll">' + table_html + "</div>",
+        monthly_css + table_html,
         unsafe_allow_html=True,
     )
 
@@ -1291,6 +1441,21 @@ with st.sidebar:
         help="권장 시트명: 원자재, 환율 / 필수 열: 품목, 날짜, 값",
     )
 
+    storage_ready = get_storage_settings() is not None
+    if uploaded_file is not None:
+        save_clicked = st.button(
+            "현재 파일 저장",
+            type="primary",
+            use_container_width=True,
+            disabled=not storage_ready,
+            help="이 파일을 최신 데이터로 저장합니다.",
+        )
+    else:
+        save_clicked = False
+
+    if not storage_ready:
+        st.caption("Streamlit 설정에 GitHub 토큰을 등록하면 저장 버튼을 사용할 수 있습니다.")
+
     months_to_show = st.selectbox(
         "표시 기간",
         options=[6, 12, 18, 24, 36],
@@ -1298,21 +1463,46 @@ with st.sidebar:
         format_func=lambda x: f"최근 {x}개월",
     )
 
-if uploaded_file is None:
-    st.info("왼쪽에서 엑셀 입력 양식을 내려받아 데이터를 입력한 뒤 업로드해 주세요.")
+saved_file_error = None
+saved_file_bytes = None
+if uploaded_file is None and storage_ready:
+    try:
+        saved_file_bytes = load_saved_file()
+    except Exception as exc:
+        saved_file_error = str(exc)
+
+if saved_file_error:
+    st.warning(f"최근 저장 파일을 불러오지 못했습니다: {saved_file_error}")
+
+if uploaded_file is None and saved_file_bytes is None:
+    st.info("왼쪽에서 엑셀 파일을 업로드해 주세요. 저장한 파일이 있으면 다음 접속부터 자동으로 표시됩니다.")
     st.stop()
 
 try:
-    file_bytes = uploaded_file.getvalue()
+    file_bytes = uploaded_file.getvalue() if uploaded_file is not None else saved_file_bytes
     datasets, load_messages, sheet_names = load_excel(file_bytes)
 except Exception as exc:
     st.error(f"엑셀 파일을 읽는 중 오류가 발생했습니다: {exc}")
     st.stop()
 
-st.success(
-    f"'{uploaded_file.name}' 파일을 불러왔습니다. "
-    f"확인된 시트: {', '.join(sheet_names)}"
-)
+if save_clicked:
+    try:
+        save_latest_file(file_bytes)
+        st.toast("최신 파일로 저장했습니다.", icon="✅")
+        st.success("저장이 완료되었습니다. 다음부터는 이 링크만 열어도 현재 데이터가 자동으로 표시됩니다.")
+    except Exception as exc:
+        st.error(f"파일을 저장하지 못했습니다: {exc}")
+
+if uploaded_file is not None:
+    st.success(
+        f"'{uploaded_file.name}' 파일을 불러왔습니다. "
+        f"확인된 시트: {', '.join(sheet_names)}"
+    )
+else:
+    st.success(
+        "최근 저장한 파일을 자동으로 불러왔습니다. "
+        f"확인된 시트: {', '.join(sheet_names)}"
+    )
 
 for message in load_messages:
     st.warning(message)
